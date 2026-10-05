@@ -22,6 +22,7 @@ npx @deepseek-ai/dsh --profile headless "research the latest donsetch release no
 - `donsetch_web_search`: keyless engines out of the box, or your own keys via BYOK providers (Exa, Tavily, Serper, SerpApi, SerpBase, Bright Data, TinyFish, plus plugin adapters)
 - `donsetch_web_crawl`: whole-site crawling with sitemap discovery
 - `donsetch_status`: self-diagnostics (degraded daemons get one automatically)
+- Native `web_search`: the harness's own web_search tool routes through DonSeTch (the bundle patch selects the `donsetch` search provider), so ordinary searches work with no DeepSeek API key
 
 The tools are registered in-process on the harness tool registry, not as `mcp__*` imports, so they flow through dsh's permission, timeout, and cancellation pipeline like any native tool, and they show call/result cards in the Web workbench.
 

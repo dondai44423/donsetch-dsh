@@ -5,6 +5,7 @@
  */
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -32,6 +33,28 @@ before(() => {
 })
 
 after(() => {
+  // Safety net: an assertion failure before dispose() leaks the fake
+  // daemon child, and a live child with open pipes keeps this process's
+  // event loop alive forever, hanging the whole run (there is no test
+  // timeout on this suite). Kill any of our own leaked fake children
+  // before leaving.
+  if (process.platform !== 'win32') {
+    try {
+      const out = spawnSync('ps', ['-eo', 'pid,ppid,args'], { encoding: 'utf8' }).stdout
+      for (const line of out.split('\n')) {
+        const m = line.trim().match(/^(\d+)\s+(\d+)\s+.*fake-mcp-server/)
+        if (m && m[2] === String(process.pid)) {
+          try {
+            process.kill(Number(m[1]), 'SIGKILL')
+          } catch {
+            // Already gone.
+          }
+        }
+      }
+    } catch {
+      // ps unavailable; the per-test dispose paths still cover cleanup.
+    }
+  }
   rmSync(artifact, { recursive: true, force: true })
 })
 
@@ -45,13 +68,13 @@ const makeClient = (callTimeoutMs = 5000) =>
     env,
   })
 
-test('boot: initialize + tools/list exposes all five tools', async () => {
+test('boot: initialize + tools/list exposes all six tools', async () => {
   const c = makeClient()
   await c.start()
   assert.equal(c.serverVersion, '9.9.9-test')
   assert.deepEqual(
     c.tools.map((t) => t.name),
-    ['echo_tool', 'fail_tool', 'slow_tool', 'crash_tool', 'has space!!'],
+    ['echo_tool', 'fail_tool', 'slow_tool', 'crash_tool', 'web_search', 'has space!!'],
   )
   assert.equal(c.tools[0].inputSchema.type, 'object')
   await c.dispose(300)

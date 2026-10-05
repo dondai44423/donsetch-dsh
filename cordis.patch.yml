@@ -7,3 +7,14 @@
       name: '@dsh-external/donsetch'
       config:
         toolPrefix: donsetch
+
+# Route the harness's native web_search through DonSeTch (donsetch-dsh#4).
+# The base layer pins the seam's `searchProvider` to `deepseek-official`,
+# so the native tool tried DeepSeek first and failed without a
+# DEEPSEEK_API_KEY even with this plugin installed. A patch replaces the
+# row's whole config, and this id names the provider the plugin registers
+# at load. A patch that matches no row is warned and skipped, so profiles
+# without the web seam are unaffected.
+- id: web
+  config:
+    searchProvider: donsetch

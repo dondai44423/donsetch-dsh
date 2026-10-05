@@ -21,6 +21,10 @@ declare module '@deepseek-ai/cordis' {
     on<T = unknown>(event: string, listener: (data: T, ...more: unknown[]) => void): () => void
     /** Simple logger compatible with console, when the host mounts one. */
     logger?: Pick<Console, 'debug' | 'info' | 'warn' | 'error'>
+    /** Read a service without an inject requirement; undefined when not (yet) provided. */
+    get<T = unknown>(id: string, strict?: boolean): T | undefined
+    /** Run a callback once the named services are available (cordis ctx.inject). */
+    inject(inject: string[] | Record<string, unknown>, callback: (ctx: Context, config: unknown) => void): unknown
   }
 }
 
@@ -68,5 +72,47 @@ declare module '@deepseek-ai/dsh-tools' {
   export interface ToolRuntime {
     /** Register a tool globally; returns the exact disposer for it. */
     register(definition: ToolDefinition): () => void
+  }
+}
+
+declare module '@deepseek-ai/dsh-web' {
+  /** One search-capable backend, registered via ctx.web.registerSearchProvider. */
+  export interface WebSearchProvider {
+    /** Stable registry key; unique within the search capability. */
+    readonly id: string
+    /** Cheap local usability check; must not make network calls. */
+    available(): boolean
+    /** Run one search; honor `signal` for cancellation. */
+    search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
+  }
+
+  export interface WebSearchRequest {
+    readonly query: string
+    readonly maxResults?: number
+  }
+
+  /** One citeable source. A source always has a URL; the rest is optional. */
+  export interface WebSearchSource {
+    readonly url: string
+    readonly title?: string
+    readonly snippet?: string
+    readonly publishedAt?: string
+  }
+
+  export interface WebSearchResult {
+    /** Optional provider-generated answer text. */
+    readonly content?: string
+    /** Citeable sources, already truncated to the request's maxResults. */
+    readonly sources: readonly WebSearchSource[]
+    /** True when the seam dropped sources to honor maxResults. */
+    readonly truncated: boolean
+  }
+
+  /** The web access seam (ctx.web). */
+  export interface WebRuntime {
+    /** Register a search provider; returns its unregister disposer. */
+    registerSearchProvider(provider: WebSearchProvider): () => void
+    /** Run one search through the selected provider. */
+    search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
   }
 }

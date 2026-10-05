@@ -12,6 +12,7 @@
  *   FAKE_BOOT_LOG    path appended on every initialize
  *   FAKE_RAW_LOG     path appended with every inbound frame
  *   FAKE_ALL_LOG     path appended with every inbound method
+ *   FAKE_SEARCH_ARGS_LOG  path appended with every web_search arguments object
  *   FAKE_CRASH_LOG   path written with any uncaught exception
  */
 import { appendFileSync, writeFileSync } from 'node:fs'
@@ -42,6 +43,7 @@ const TOOLS = [
   { name: 'fail_tool', description: 'always fails', inputSchema: { type: 'object', properties: {} } },
   { name: 'slow_tool', description: 'slow', inputSchema: { type: 'object', properties: {} } },
   { name: 'crash_tool', description: 'kills the server', inputSchema: { type: 'object', properties: {} } },
+  { name: 'web_search', description: 'search the web', inputSchema: { type: 'object', properties: { query: { type: 'string' }, max_results: { type: 'number' } }, required: ['query'] } },
   { name: 'has space!!', description: 'illegal name', inputSchema: { type: 'object', properties: {} } },
 ]
 
@@ -96,6 +98,36 @@ async function handleCall(msg) {
   if (name === 'echo_tool') {
     await sleep(50)
     emit({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo:' + (msg.params?.arguments?.text ?? '') }] } })
+  } else if (name === 'web_search') {
+    const args = msg.params?.arguments ?? {}
+    logLine('FAKE_SEARCH_ARGS_LOG', JSON.stringify(args))
+    const query = String(args.query ?? '')
+    if (query.startsWith('fail')) {
+      emit({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'search failed: no engines answered' }], isError: true } })
+    } else {
+      emit({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: {
+          content: [{ type: 'text', text: '# Search results\n- example\n' }],
+          structuredContent: {
+            weak: false,
+            results: [
+              { rank: 1, url: 'https://example.com/a', handle: 'h1' },
+              { rank: 2, url: 'https://example.com/b', handle: 'h2' },
+            ],
+          },
+          _meta: {
+            'com.donsetch/search-debug': {
+              results: [
+                { title: 'Example A', url: 'https://example.com/a', snippet: 'first snippet' },
+                { title: 'Example B', url: 'https://example.com/b', snippet: 'second snippet' },
+              ],
+            },
+          },
+        },
+      })
+    }
   } else if (name === 'fail_tool') {
     emit({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'boom: upstream refused' }], isError: true } })
   } else if (name === 'slow_tool') {

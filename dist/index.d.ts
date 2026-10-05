@@ -18,7 +18,10 @@
  * - a donsetch_status tool reports version, daemon state, and the
  *   doctor output so the agent can self-diagnose;
  * - the binary auto-updates from GitHub Releases on the configured
- *   channel, SHA256-verified, swapped only between in-flight calls.
+ *   channel, SHA256-verified, swapped only between in-flight calls;
+ * - the harness's native web_search tool is routed through a donsetch
+ *   search provider (the bundle patch selects it), so ordinary
+ *   web_search calls work with no DeepSeek API key.
  *
  * Zero runtime imports from the host train: the plugin talks to the
  * harness exclusively through the ctx handed to apply().

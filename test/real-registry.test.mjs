@@ -20,11 +20,13 @@ if (!BIN || !existsSync(BIN)) {
   test('real-registry proof: register, validateArgs, live search through the real pipeline', async () => {
     let cordis = null
     let dshTools = null
+    let dshWeb = null
     try {
       cordis = await import('@deepseek-ai/cordis')
       dshTools = await import('@deepseek-ai/dsh-tools')
+      dshWeb = await import('@deepseek-ai/dsh-web')
     } catch {
-      assert.fail('real-registry proof requires @deepseek-ai/cordis and @deepseek-ai/dsh-tools (npm i them in the test env)')
+      assert.fail('real-registry proof requires @deepseek-ai/cordis, @deepseek-ai/dsh-tools and @deepseek-ai/dsh-web (npm i them in the test env)')
       return
     }
     const { Context, Service } = cordis
@@ -67,6 +69,9 @@ if (!BIN || !existsSync(BIN)) {
     const keepAlive = []
     keepAlive.push(ctx.plugin(StubSystemPrompt))
     keepAlive.push(ctx.plugin(CapturingRuntime))
+    // The web seam, configured the way the bundle patch configures it:
+    // searchProvider pinned to the provider this plugin registers.
+    keepAlive.push(ctx.plugin(dshWeb.WebRuntime, { searchProvider: 'donsetch' }))
     await Promise.all(keepAlive)
     Object.defineProperty(ctx, 'tools', { value: globalThis.__tools, configurable: true })
     const pluginHandle = apply(ctx, {
@@ -127,6 +132,23 @@ if (!BIN || !existsSync(BIN)) {
       const text = (result?.content ?? []).map((b) => (typeof b?.text === 'string' ? b.text : '')).join(' ')
       assert.equal(result?.isError, false, `search errored: ${text}`)
       assert.ok(text.length > 40, `search returned empty through the real pipeline: ${JSON.stringify(result).slice(0, 400)}`)
+
+      // The native web_search path (donsetch-dsh#4): ctx.web.search with the
+      // seam configured to the donsetch provider must resolve through OUR
+      // registered provider and return mapped sources, with no DeepSeek key
+      // anywhere in the environment.
+      const webSearch = await ctx.web.search({
+        query: 'what is the rust programming language',
+        maxResults: 4,
+      })
+      assert.ok(
+        Array.isArray(webSearch.sources) && webSearch.sources.length > 0,
+        `ctx.web.search resolved no sources through the donsetch provider: ${JSON.stringify(webSearch).slice(0, 300)}`,
+      )
+      assert.ok(
+        webSearch.sources.every((s) => typeof s.url === 'string' && s.url.startsWith('http')),
+        `sources must carry URLs: ${JSON.stringify(webSearch.sources).slice(0, 300)}`,
+      )
     } finally {
       await pluginHandle.dispose()
       for (const fiber of keepAlive) {

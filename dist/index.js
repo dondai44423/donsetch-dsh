@@ -18,7 +18,10 @@
  * - a donsetch_status tool reports version, daemon state, and the
  *   doctor output so the agent can self-diagnose;
  * - the binary auto-updates from GitHub Releases on the configured
- *   channel, SHA256-verified, swapped only between in-flight calls.
+ *   channel, SHA256-verified, swapped only between in-flight calls;
+ * - the harness's native web_search tool is routed through a donsetch
+ *   search provider (the bundle patch selects it), so ordinary
+ *   web_search calls work with no DeepSeek API key.
  *
  * Zero runtime imports from the host train: the plugin talks to the
  * harness exclusively through the ctx handed to apply().
@@ -157,6 +160,56 @@ function renderContent(value) {
         return [{ type: 'text', text: 'donsetch returned no content' }];
     return blocks;
 }
+/** Provider-side error shape the web seam surfaces in tool metadata. */
+class DonsetchWebError extends Error {
+    code;
+    constructor(message, code) {
+        super(message);
+        this.name = 'DonsetchWebError';
+        this.code = code;
+    }
+}
+function webSearchError(message, code = 'WEB_PROVIDER_ERROR') {
+    return new DonsetchWebError(message, code);
+}
+/**
+ * Project one donsetch `web_search` MCP result into the seam's
+ * WebSearchResult. Sources come from the daemon's full machine view
+ * (_meta["com.donsetch/search-debug"].results carries title and
+ * snippet), with the lightweight structuredContent list as fallback;
+ * an instant answer becomes the result's optional content.
+ */
+function webSearchResultFrom(result) {
+    const r = (result ?? {});
+    const sources = [];
+    const seen = new Set();
+    const take = (row) => {
+        const url = typeof row.url === 'string' && row.url.length > 0 ? row.url : undefined;
+        if (url === undefined || seen.has(url))
+            return;
+        seen.add(url);
+        sources.push({
+            url,
+            ...(typeof row.title === 'string' && row.title.length > 0 ? { title: row.title } : {}),
+            ...(typeof row.snippet === 'string' && row.snippet.length > 0 ? { snippet: row.snippet } : {}),
+        });
+    };
+    const meta = r._meta;
+    const debug = meta?.['com.donsetch/search-debug'];
+    const rawDebug = debug?.results;
+    const debugRows = Array.isArray(rawDebug) ? rawDebug : [];
+    const structured = r.structuredContent;
+    const rawStructured = structured?.results;
+    const structuredRows = Array.isArray(rawStructured)
+        ? rawStructured
+        : [];
+    for (const row of debugRows.length > 0 ? debugRows : structuredRows)
+        take(row);
+    const instant = structured?.instant;
+    const instantText = instant?.text;
+    const content = typeof instantText === 'string' && instantText.length > 0 ? instantText : undefined;
+    return content === undefined ? { sources, truncated: false } : { sources, truncated: false, content };
+}
 export function apply(ctx, rawConfig = {}) {
     let config;
     const inert = { dispose: async () => { } };
@@ -189,6 +242,68 @@ export function apply(ctx, rawConfig = {}) {
     let activeCalls = 0;
     let statusRegistrations = [];
     let disposed = false;
+    function makeSearchProvider() {
+        return {
+            id: 'donsetch',
+            // Cheap local check; the daemon boots on demand inside search().
+            available: () => !disposed,
+            search: async (request, signal) => {
+                const healthy = await ensureDaemon(signal);
+                if (!healthy) {
+                    throw webSearchError(`donsetch is unavailable (${bootError ?? 'not running'}); check ${config.toolPrefix}_status for diagnostics`);
+                }
+                const args = { query: request.query };
+                if (request.maxResults !== undefined)
+                    args.max_results = request.maxResults;
+                let result;
+                try {
+                    result = await booted.client.callTool('web_search', args, signal, callTimeoutFor('web_search', args, config.callTimeoutMs));
+                }
+                catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    throw webSearchError(message, signal?.aborted === true ? 'WEB_ABORTED' : 'WEB_PROVIDER_ERROR');
+                }
+                if (result?.isError === true) {
+                    throw webSearchError(joinBlocks(result) || 'donsetch web_search failed');
+                }
+                return webSearchResultFrom(result);
+            },
+        };
+    }
+    // ── Native web_search routing (donsetch-dsh#4) ──
+    // The harness's own `web_search` tool executes through the ctx.web
+    // seam. Registering the "donsetch" provider here makes that id
+    // resolvable, and the bundle patch points the web row's searchProvider
+    // at it, so the native tool runs through the same daemon (and the same
+    // BYOK keys) as the donsetch_* tools, with no DeepSeek API key
+    // required. Zero runtime imports from the host train: the seam arrives
+    // through ctx, exactly like the tools registry.
+    const registerWebProvider = (web) => {
+        if (web === undefined || typeof web.registerSearchProvider !== 'function')
+            return;
+        try {
+            web.registerSearchProvider(makeSearchProvider());
+            log('native web_search routes through the donsetch provider');
+        }
+        catch (err) {
+            warn(`could not register the web search provider: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    };
+    const seamNow = typeof ctx.get === 'function' ? ctx.get('web') : undefined;
+    if (seamNow !== undefined) {
+        registerWebProvider(seamNow);
+    }
+    else if (typeof ctx.inject === 'function') {
+        // The seam may activate after this plugin; wait for it. A profile
+        // with no seam at all simply never fires this; the donsetch_* tools
+        // are unaffected either way.
+        ctx.inject(['web'], (c) => {
+            registerWebProvider(typeof c.get === 'function' ? c.get('web') : undefined);
+        });
+    }
+    else {
+        log('no ctx.web seam in this profile; the native web_search tool is not rerouted');
+    }
     function runDoctor(binPath) {
         const cmd = binPath ?? 'donsetch';
         try {

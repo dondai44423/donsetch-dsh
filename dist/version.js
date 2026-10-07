@@ -11,7 +11,7 @@ export const PLUGIN_VERSION = '1.1.2';
  * the floor, not a ceiling. Bump on donsetch patch releases when the
  * plugin wants a newer baseline.
  */
-export const PINNED_DONSETCH_VERSION = '4.5.1';
+export const PINNED_DONSETCH_VERSION = '4.5.7';
 /** All-numeric characters, base-independent digit check. */
 function isDigit(ch) {
     return ch >= '0' && ch <= '9';

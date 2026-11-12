@@ -13,7 +13,7 @@ export const PLUGIN_VERSION = '1.1.2'
  * the floor, not a ceiling. Bump on donsetch patch releases when the
  * plugin wants a newer baseline.
  */
-export const PINNED_DONSETCH_VERSION = '5.2.1'
+export const PINNED_DONSETCH_VERSION = '5.3.0'
 
 export interface Semver {
   major: number

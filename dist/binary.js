@@ -7,7 +7,7 @@
 import { compareSemver, isNewer, parseSemver } from './version.js';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
@@ -97,6 +97,19 @@ function isRegularFile(path) {
         return false;
     }
 }
+function isExecutableFile(path) {
+    if (!isRegularFile(path))
+        return false;
+    if (process.platform === 'win32')
+        return true;
+    try {
+        accessSync(path, fsConstants.X_OK);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
 function findOnPath(name) {
     const dirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
     const suffixes = process.platform === 'win32' && !/\.(exe|cmd|bat)$/i.test(name)
@@ -105,7 +118,7 @@ function findOnPath(name) {
     for (const dir of dirs) {
         for (const suffix of suffixes) {
             const candidate = join(dir, name + suffix);
-            if (isRegularFile(candidate))
+            if (isExecutableFile(candidate))
                 return candidate;
         }
     }
@@ -206,7 +219,16 @@ async function acquireLock(dir, timeoutMs) {
         }
         catch {
             if (isStaleLock(lock, ownerFile)) {
-                rmSync(lock, { recursive: true, force: true });
+                // Rename atomically before removing so two waiters racing to reap the
+                // same stale lock cannot delete a fresh lock acquired by the other.
+                const graveyard = join(dir, `.install.lock.reap-${process.pid}-${Date.now()}`);
+                try {
+                    renameSync(lock, graveyard);
+                    rmSync(graveyard, { recursive: true, force: true });
+                }
+                catch {
+                    // Another waiter already reaped or replaced it; retry acquire.
+                }
                 continue;
             }
             if (Date.now() - start > timeoutMs) {
@@ -401,19 +423,34 @@ function httpResult(res) {
 function httpGet(url, timeoutMs) {
     return new Promise((resolve, reject) => {
         const deadline = Date.now() + timeoutMs;
+        let settled = false;
+        const settleResolve = (value) => {
+            if (settled)
+                return;
+            settled = true;
+            resolve(value);
+        };
+        const settleReject = (err) => {
+            if (settled)
+                return;
+            settled = true;
+            reject(err);
+        };
         const makeTimeoutError = () => new Error(`request timed out after ${timeoutMs}ms`);
         const driver = (target, redirectsLeft) => {
+            if (settled)
+                return;
             let parsed;
             try {
                 parsed = new URL(target);
             }
             catch {
-                reject(new Error(`invalid URL: ${target}`));
+                settleReject(new Error(`invalid URL: ${target}`));
                 return;
             }
             const remaining = deadline - Date.now();
             if (remaining <= 0) {
-                reject(makeTimeoutError());
+                settleReject(makeTimeoutError());
                 return;
             }
             let activeRes = null;
@@ -423,7 +460,7 @@ function httpGet(url, timeoutMs) {
                 if (activeRes !== null)
                     activeRes.destroy(err);
                 req.destroy(err);
-                reject(err);
+                settleReject(err);
             }, remaining);
             const req = mod(parsed, { method: 'GET', headers: { 'user-agent': 'donsetch-dsh-plugin', accept: '*/*', connection: 'close' } }, (res) => {
                 activeRes = res;
@@ -431,14 +468,15 @@ function httpGet(url, timeoutMs) {
                 if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                     if (redirectsLeft <= 0) {
                         clearTimeout(timer);
-                        void result.drain().finally(() => reject(new Error('too many redirects')));
+                        void result.drain().finally(() => settleReject(new Error('too many redirects')));
                         return;
                     }
                     const next = new URL(res.headers.location, parsed).toString();
                     if (next !== target && (next.startsWith('http://') || next.startsWith('https://'))) {
                         void result.drain().finally(() => {
                             clearTimeout(timer);
-                            driver(next, redirectsLeft - 1);
+                            if (!settled)
+                                driver(next, redirectsLeft - 1);
                         });
                         return;
                     }
@@ -446,11 +484,11 @@ function httpGet(url, timeoutMs) {
                 const clear = () => clearTimeout(timer);
                 res.once('end', clear);
                 res.once('close', clear);
-                resolve(result);
+                settleResolve(result);
             });
             req.on('error', (err) => {
                 clearTimeout(timer);
-                reject(err instanceof Error ? err : new Error(String(err)));
+                settleReject(err instanceof Error ? err : new Error(String(err)));
             });
             req.end();
         };

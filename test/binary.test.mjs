@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
@@ -211,6 +211,7 @@ test('resolveBinary: DONSETCH_BIN rejects directories and resolves bare names on
   const cmdName = process.platform === 'win32' ? 'custom-donsetch.exe' : 'custom-donsetch'
   const cmdPath = join(pathDir, cmdName)
   writeFileSync(cmdPath, '#!/bin/sh\n')
+  if (process.platform !== 'win32') chmodSync(cmdPath, 0o755)
   const prevPath = process.env.PATH
   process.env.PATH = `${pathDir}${delimiter}${prevPath ?? ''}`
   process.env.DONSETCH_BIN = 'custom-donsetch'

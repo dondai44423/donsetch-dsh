@@ -162,6 +162,11 @@ test('apply: live config file change restarts the daemon (boot count), tools sta
     const now = new Date()
     utimesSync(donsetchConfigPath(), now, now)
     await harness.waitFor(() => bootCount() > bootsBefore, 12000)
+    // Wait for the restarted daemon to finish booting (execute awaits ensureDaemon)
+    // before inspecting ds_status, avoiding a race with the child's boot log write.
+    const echo = findDef(harness, 'ds_echo_tool')
+    const result = await echo.execute({ text: 'after-swap' }, { signal: new AbortController().signal })
+    assert.equal(result.content[0].text, 'echo:after-swap')
     // Exactly one extra boot: the config-triggered daemon swap.
     assert.equal(bootCount(), bootsBefore + 1)
     // Tools remain registered after the swap, and status reports running
@@ -174,9 +179,6 @@ test('apply: live config file change restarts the daemon (boot count), tools sta
     assert.match(statusText, /state: daemon running/)
     assert.doesNotMatch(statusText, /skipping duplicate tool name/, 'restart must refresh tools without duplicate errors')
     assert.match(statusText, /registration failures \(1\):/, 'only the genuinely invalid tool name should be recorded')
-    const echo = findDef(harness, 'ds_echo_tool')
-    const result = await echo.execute({ text: 'after-swap' }, { signal: new AbortController().signal })
-    assert.equal(result.content[0].text, 'echo:after-swap')
   } finally {
     await harness.dispose()
   }

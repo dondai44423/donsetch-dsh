@@ -5,7 +5,7 @@
  */
 
 /** Bump together with package.json on plugin releases. */
-export const PLUGIN_VERSION = '1.1.2'
+export const PLUGIN_VERSION = '1.1.3'
 
 /**
  * The donsetch release a fresh plugin install downloads. Auto-update

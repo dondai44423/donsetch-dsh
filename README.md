@@ -55,6 +55,13 @@ donsetch mcp ...                    # identical surface elsewhere
 
 CLI changes land in the live dsh plugin within seconds: the plugin watches the config file and swaps the daemon without a dsh restart.
 
+On NAS or container hosts where Chrome cannot be installed locally, `web_fetch`, `web_search`, and `web_crawl` need no browser at all. For `web_screenshot`, point DonSeTch at an external Chromium DevTools Protocol (CDP) browser in `donsetch.toml` (or via `DONSETCH_BROWSER__CDP_URL`):
+
+```toml
+[browser]
+cdp_url = "http://192.168.1.50:9222" # or ws://.../devtools/browser/...
+```
+
 ## Configuration
 
 All defaults are sensible; the plugin works with zero configuration. Options come from the bundle patch (edit `$DSH_HOME/cordis.patch.yml` to override) plus environment variables.

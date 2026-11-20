@@ -26,13 +26,6 @@ export interface DownloadOptions {
     timeoutMs?: number;
     onProgress?(state: string): void;
 }
-/**
- * Resolve the binary to run. Order:
- *  1. DONSETCH_BIN env override (absolute or on PATH).
- *  2. The newest verified release binary already in the cache.
- *  3. A fresh download of `pinned` from GitHub Releases, verified.
- *  4. A `donsetch` on PATH, when allowPathFallback (degraded).
- */
 export declare function resolveBinary(pinned: string, allowPathFallback: boolean, options?: DownloadOptions): Promise<ResolvedBinary>;
 /**
  * Download the pinned release asset, verify its .sha256 sidecar,

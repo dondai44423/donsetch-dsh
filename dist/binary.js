@@ -7,11 +7,11 @@
 import { compareSemver, isNewer, parseSemver } from './version.js';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 const REPO = 'dondai44423/donsetch';
 // Internal seam: tests point these at a local HTTP fixture. Read at
 // call time so tests can set the env after module import.
@@ -76,7 +76,7 @@ export function installedVersions() {
         const parsed = parseSemver(entry);
         if (parsed === null)
             continue;
-        if (!existsSync(join(root, entry, BINARY_NAME)))
+        if (!isRegularFile(join(root, entry, BINARY_NAME)))
             continue;
         out.push(parsed);
     }
@@ -89,19 +89,50 @@ export function installedVersions() {
  *  3. A fresh download of `pinned` from GitHub Releases, verified.
  *  4. A `donsetch` on PATH, when allowPathFallback (degraded).
  */
+function isRegularFile(path) {
+    try {
+        return statSync(path).isFile();
+    }
+    catch {
+        return false;
+    }
+}
+function findOnPath(name) {
+    const dirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+    const suffixes = process.platform === 'win32' && !/\.(exe|cmd|bat)$/i.test(name)
+        ? ['', '.exe', '.cmd', '.bat']
+        : [''];
+    for (const dir of dirs) {
+        for (const suffix of suffixes) {
+            const candidate = join(dir, name + suffix);
+            if (isRegularFile(candidate))
+                return candidate;
+        }
+    }
+    return null;
+}
+function resolveEnvBinary(spec) {
+    if (spec.includes('/') || spec.includes('\\') || isRegularFile(spec)) {
+        return isRegularFile(spec) ? spec : null;
+    }
+    return findOnPath(spec);
+}
 export async function resolveBinary(pinned, allowPathFallback, options = {}) {
     const env = process.env.DONSETCH_BIN?.trim();
     if (env) {
-        if (existsSync(env))
-            return { path: env, version: 'env', source: 'path' };
-        throw new Error(`DONSETCH_BIN points at ${env}, which does not exist.`);
+        const resolvedEnv = resolveEnvBinary(env);
+        if (resolvedEnv !== null)
+            return { path: resolvedEnv, version: 'env', source: 'path' };
+        throw new Error(`DONSETCH_BIN points at ${env}, which does not exist or is not a file.`);
     }
     const installed = installedVersions().sort((a, b) => compareSemver(versionString(a), versionString(b)));
     const newest = installed.length > 0 ? versionString(installed[installed.length - 1]) : null;
-    if (newest !== null) {
-        const p = binaryAt(newest);
-        if (existsSync(p))
-            return { path: p, version: newest, source: 'release' };
+    const newestPath = newest !== null ? binaryAt(newest) : null;
+    const hasCached = newest !== null && newestPath !== null && isRegularFile(newestPath);
+    // Honor pinned as a minimum floor while allowing newer auto-updated
+    // installs in the cache to win.
+    if (hasCached && (parseSemver(pinned) === null || !isNewer(pinned, newest))) {
+        return { path: newestPath, version: newest, source: 'release' };
     }
     try {
         const path = await downloadBinary(pinned, options);
@@ -110,6 +141,10 @@ export async function resolveBinary(pinned, allowPathFallback, options = {}) {
     catch (err) {
         if (!allowPathFallback)
             throw err;
+        if (hasCached) {
+            options.onProgress?.(`donsetch v${pinned} download failed; using cached v${newest}`);
+            return { path: newestPath, version: newest, source: 'release' };
+        }
         // Last resort: any donsetch already on this machine. Version may
         // lag the plugin's tools; the status tool says so.
         const onPath = whichDonsetch();
@@ -125,22 +160,55 @@ function versionString(v) {
     return `${v.major}.${v.minor}.${v.patch}${pre}`;
 }
 function whichDonsetch() {
-    if (process.platform === 'win32')
-        return null;
-    const result = spawnSync('which', ['donsetch'], { encoding: 'utf8', timeout: 5000 });
-    const path = (result.stdout ?? '').trim();
-    return path ? path : null;
+    return findOnPath(BINARY_NAME);
+}
+const STALE_LOCK_MAX_AGE_MS = 10 * 60_000;
+function isProcessAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0)
+        return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (err) {
+        return err?.code === 'EPERM';
+    }
+}
+function isStaleLock(lock, ownerFile) {
+    try {
+        if (existsSync(ownerFile)) {
+            const pid = Number(readFileSync(ownerFile, 'utf8').trim());
+            if (Number.isInteger(pid) && pid > 0) {
+                return !isProcessAlive(pid);
+            }
+        }
+        return Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MAX_AGE_MS;
+    }
+    catch {
+        return false;
+    }
 }
 async function acquireLock(dir, timeoutMs) {
     mkdirSync(dir, { recursive: true });
     const lock = join(dir, '.install.lock');
+    const ownerFile = join(lock, 'owner.pid');
     const start = Date.now();
     for (;;) {
         try {
             mkdirSync(lock);
+            try {
+                writeFileSync(ownerFile, `${process.pid}\n`);
+            }
+            catch {
+                // Best-effort owner stamp; age check still covers unlabeled locks.
+            }
             return;
         }
         catch {
+            if (isStaleLock(lock, ownerFile)) {
+                rmSync(lock, { recursive: true, force: true });
+                continue;
+            }
             if (Date.now() - start > timeoutMs) {
                 throw new Error('timed out waiting for another donsetch install to finish (stale lock?)');
             }
@@ -175,14 +243,14 @@ export async function downloadBinary(version, options = {}) {
         throw new Error(`refusing to download donsetch version ${version}: not a valid semver`);
     const root = cacheDir();
     const timeout = options.timeoutMs ?? 120_000;
-    await acquireLock(root, 120_000);
+    await acquireLock(root, timeout);
     try {
         if (!PLATFORM.supported) {
             throw new Error(`donsetch does not ship a binary for ${PLATFORM.key}. Supported platforms: linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64.`);
         }
         // Already fully installed? Short-circuit (also covers races).
         const target = binaryAt(version);
-        if (existsSync(target))
+        if (isRegularFile(target))
             return target;
         const asset = PLATFORM.asset;
         const base = `${releasesBase()}/v${version}/${asset}`;
@@ -197,22 +265,32 @@ export async function downloadBinary(version, options = {}) {
         if (sidecarResp === null || !sidecarResp.ok) {
             if (sidecarResp !== null)
                 await sidecarResp.drain();
+            await tarballResp.drain();
             throw new Error(`donsetch v${version} ${PLATFORM.key} asset found but its .sha256 sidecar is missing; refusing to install an unverifiable binary`);
         }
-        const sidecarText = (await sidecarResp.text(64 * 1024)).trim();
+        let sidecarText;
+        try {
+            sidecarText = (await sidecarResp.text(64 * 1024)).trim();
+        }
+        catch (err) {
+            await tarballResp.drain();
+            throw err;
+        }
         const sidecarMatch = /^([a-f0-9]{64})(?:\s|$)/.exec(sidecarText);
-        if (sidecarMatch === null)
+        if (sidecarMatch === null) {
+            await tarballResp.drain();
             throw new Error(`donsetch v${version} .sha256 sidecar is malformed; refusing to install`);
+        }
         const expected = sidecarMatch[1];
         mkdirSync(root, { recursive: true });
         const tmpDir = join(root, `.tmp-${process.pid}-${Date.now()}`);
         const tarballPath = join(tmpDir, 'donsetch.tar.gz');
         const extractDir = join(tmpDir, 'out');
         mkdirSync(tmpDir, { recursive: true });
-        options.onProgress?.(`downloading donsetch v${version} for ${PLATFORM.key}`);
-        const hash = createHash('sha256');
-        let bytes = 0;
         try {
+            options.onProgress?.(`downloading donsetch v${version} for ${PLATFORM.key}`);
+            const hash = createHash('sha256');
+            let bytes = 0;
             const chunks = [];
             for await (const buf of tarballResp) {
                 bytes += buf.length;
@@ -226,16 +304,10 @@ export async function downloadBinary(version, options = {}) {
                 throw new Error(`SHA256 mismatch for donsetch v${version} ${PLATFORM.key}: expected ${expected}, got ${digest}`);
             }
             writeFileSync(tarballPath, Buffer.concat(chunks));
-        }
-        catch (err) {
-            rmSync(tmpDir, { recursive: true, force: true });
-            throw err;
-        }
-        options.onProgress?.(`verifying and extracting donsetch v${version}`);
-        try {
+            options.onProgress?.(`verifying and extracting donsetch v${version}`);
             extract(tarballPath, extractDir);
             const extracted = join(extractDir, BINARY_NAME);
-            if (!existsSync(extracted)) {
+            if (!isRegularFile(extracted)) {
                 throw new Error(`expected ${BINARY_NAME} after extraction but it is missing; refusing to install`);
             }
             if (process.platform !== 'win32')
@@ -247,9 +319,8 @@ export async function downloadBinary(version, options = {}) {
             renameSync(extractDir, finalDir);
             return binaryAt(version);
         }
-        catch (err) {
+        finally {
             rmSync(tmpDir, { recursive: true, force: true });
-            throw err;
         }
     }
     finally {
@@ -258,16 +329,27 @@ export async function downloadBinary(version, options = {}) {
 }
 function httpResult(res) {
     const consumed = { done: false };
+    let streamError = null;
+    res.on('error', (err) => {
+        streamError = err instanceof Error ? err : new Error(String(err));
+    });
+    res.on('end', () => {
+        consumed.done = true;
+    });
+    res.on('close', () => {
+        consumed.done = true;
+    });
     const drain = () => new Promise((resolve) => {
-        if (consumed.done) {
+        if (consumed.done || res.destroyed || res.complete) {
+            consumed.done = true;
             resolve();
             return;
         }
         consumed.done = true;
         res.resume();
-        res.on('end', resolve);
-        res.on('error', resolve);
-        res.on('close', resolve);
+        res.once('end', resolve);
+        res.once('error', () => resolve());
+        res.once('close', resolve);
     });
     return {
         ok: res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300,
@@ -275,6 +357,10 @@ function httpResult(res) {
         drain,
         text(maxBytes) {
             return new Promise((resolve, reject) => {
+                if (streamError !== null) {
+                    reject(streamError);
+                    return;
+                }
                 const chunks = [];
                 let size = 0;
                 res.on('data', (chunk) => {
@@ -295,6 +381,12 @@ function httpResult(res) {
             });
         },
         [Symbol.asyncIterator]() {
+            if (streamError !== null) {
+                const err = streamError;
+                return {
+                    next: () => Promise.reject(err),
+                };
+            }
             return res[Symbol.asyncIterator]();
         },
     };
@@ -302,10 +394,14 @@ function httpResult(res) {
 /**
  * GET with timeout + redirect following, via raw node:http(s). No
  * undici, no pooled sockets: every request owns its socket and the
- * body contract (drain/text/iterate) guarantees release.
+ * body contract (drain/text/iterate) guarantees release. The timeout
+ * covers both response headers and full body transfer so a stalled CDN
+ * stream cannot hold the install lock forever.
  */
 function httpGet(url, timeoutMs) {
     return new Promise((resolve, reject) => {
+        const deadline = Date.now() + timeoutMs;
+        const makeTimeoutError = () => new Error(`request timed out after ${timeoutMs}ms`);
         const driver = (target, redirectsLeft) => {
             let parsed;
             try {
@@ -315,30 +411,47 @@ function httpGet(url, timeoutMs) {
                 reject(new Error(`invalid URL: ${target}`));
                 return;
             }
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
+                reject(makeTimeoutError());
+                return;
+            }
+            let activeRes = null;
             const mod = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
+            const timer = setTimeout(() => {
+                const err = makeTimeoutError();
+                if (activeRes !== null)
+                    activeRes.destroy(err);
+                req.destroy(err);
+                reject(err);
+            }, remaining);
             const req = mod(parsed, { method: 'GET', headers: { 'user-agent': 'donsetch-dsh-plugin', accept: '*/*', connection: 'close' } }, (res) => {
+                activeRes = res;
                 const result = httpResult(res);
                 if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                     if (redirectsLeft <= 0) {
+                        clearTimeout(timer);
                         void result.drain().finally(() => reject(new Error('too many redirects')));
                         return;
                     }
                     const next = new URL(res.headers.location, parsed).toString();
                     if (next !== target && (next.startsWith('http://') || next.startsWith('https://'))) {
-                        void result.drain().finally(() => driver(next, redirectsLeft - 1));
+                        void result.drain().finally(() => {
+                            clearTimeout(timer);
+                            driver(next, redirectsLeft - 1);
+                        });
                         return;
                     }
                 }
+                const clear = () => clearTimeout(timer);
+                res.once('end', clear);
+                res.once('close', clear);
                 resolve(result);
             });
-            const timer = setTimeout(() => {
-                req.destroy(new Error(`request timed out after ${timeoutMs}ms`));
-            }, timeoutMs);
             req.on('error', (err) => {
                 clearTimeout(timer);
                 reject(err instanceof Error ? err : new Error(String(err)));
             });
-            req.on('response', () => clearTimeout(timer));
             req.end();
         };
         driver(url, 5);

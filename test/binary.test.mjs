@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 
 let artifact
 let cacheRoot
@@ -69,6 +69,13 @@ before(async () => {
     }
     if (req.url.endsWith('.tar.gz')) {
       tarballHits++
+      if (serveMode === 'stalled-body') {
+        res.writeHead(200, { 'content-type': 'application/gzip' })
+        res.write(Buffer.from('partial-bytes'))
+        // Intentionally never end() to simulate a mid-stream stall; clean up on close.
+        req.on('close', () => res.destroy())
+        return
+      }
       const body = serveMode === 'tampered' ? readFileSync(tamperedTarball) : readFileSync(goodTarball)
       res.setHeader('content-type', 'application/gzip')
       res.end(body)
@@ -99,6 +106,12 @@ test('downloadBinary: happy path verifies, extracts, chmods, caches', async () =
   }
   assert.equal(readFileSync(path, 'utf8'), '#!/bin/sh\necho fake-donsetch\n')
   assert.equal(installedVersions().length, 1)
+  // No temporary staging directories may survive in cacheRoot after install.
+  assert.deepEqual(
+    readdirSync(cacheRoot).filter((entry) => entry.startsWith('.tmp-')),
+    [],
+    'downloadBinary must clean up its .tmp-* staging directory on success',
+  )
   // Idempotent: second call short-circuits on the cached install.
   const again = await downloadBinary('3.5.2', { timeoutMs: 15000 })
   assert.equal(again, path)
@@ -162,5 +175,84 @@ test('resolveBinary: DONSETCH_BIN override wins over cache', async () => {
     assert.equal(resolved.source, 'path')
   } finally {
     delete process.env.DONSETCH_BIN
+  }
+})
+
+test('resolveBinary: upgrades when cached install is older than the pinned floor', async () => {
+  const { resolveBinary } = binaryApi
+  // 3.5.2 and 3.5.3 are cached; pinning 3.5.4 must install 3.5.4 instead of returning 3.5.3.
+  const resolved = await resolveBinary('3.5.4', false, { timeoutMs: 15000 })
+  assert.equal(resolved.source, 'release')
+  assert.equal(resolved.version, '3.5.4')
+  assert.ok(existsSync(resolved.path))
+})
+
+test('resolveBinary: falls back to verified cached release when offline and fallback is allowed', async () => {
+  const { resolveBinary } = binaryApi
+  // 9.9.9 returns 404 on the fixture server; allowPathFallback=true keeps the verified 3.5.4 cache entry.
+  const fallback = await resolveBinary('9.9.9', true, { timeoutMs: 5000 })
+  assert.equal(fallback.source, 'release')
+  assert.equal(fallback.version, '3.5.4')
+  // Strict callers (allowPathFallback=false) still see the download error.
+  await assert.rejects(() => resolveBinary('9.9.9', false, { timeoutMs: 5000 }), /does not ship/)
+})
+
+test('resolveBinary: DONSETCH_BIN rejects directories and resolves bare names on PATH', async () => {
+  const { resolveBinary } = binaryApi
+  const dirOnly = mkdtempSync(join(artifact, 'not-a-bin-'))
+  process.env.DONSETCH_BIN = dirOnly
+  try {
+    await assert.rejects(() => resolveBinary('3.5.4', false), /not a file/)
+  } finally {
+    delete process.env.DONSETCH_BIN
+  }
+
+  const pathDir = mkdtempSync(join(artifact, 'path-bin-'))
+  const cmdName = process.platform === 'win32' ? 'custom-donsetch.exe' : 'custom-donsetch'
+  const cmdPath = join(pathDir, cmdName)
+  writeFileSync(cmdPath, '#!/bin/sh\n')
+  const prevPath = process.env.PATH
+  process.env.PATH = `${pathDir}${delimiter}${prevPath ?? ''}`
+  process.env.DONSETCH_BIN = 'custom-donsetch'
+  try {
+    const resolved = await resolveBinary('3.5.4', false)
+    assert.equal(resolved.path, cmdPath)
+    assert.equal(resolved.source, 'path')
+  } finally {
+    process.env.PATH = prevPath
+    delete process.env.DONSETCH_BIN
+  }
+})
+
+test('downloadBinary: reaps stale .install.lock left by a dead PID', async () => {
+  const { downloadBinary } = binaryApi
+  const lockDir = join(cacheRoot, '.install.lock')
+  mkdirSync(lockDir, { recursive: true })
+  // 2147483646 is above OS PID ranges / dead, so process.kill(pid, 0) fails with ESRCH.
+  writeFileSync(join(lockDir, 'owner.pid'), '2147483646\n')
+  const start = Date.now()
+  const path = await downloadBinary('3.5.5', { timeoutMs: 5000 })
+  assert.ok(existsSync(path))
+  assert.ok(Date.now() - start < 3000, 'dead-owner lock must be reaped immediately')
+  assert.equal(existsSync(lockDir), false)
+})
+
+test('downloadBinary: stalled tarball body times out instead of hanging forever', async () => {
+  const { downloadBinary, binaryAt } = binaryApi
+  servedVersions.add('3.5.6')
+  serveMode = 'stalled-body'
+  const start = Date.now()
+  try {
+    await assert.rejects(() => downloadBinary('3.5.6', { timeoutMs: 400 }), /timed out/)
+    assert.ok(Date.now() - start < 4000, 'stalled body must abort near timeoutMs')
+    assert.equal(existsSync(binaryAt('3.5.6')), false)
+    assert.deepEqual(
+      readdirSync(cacheRoot).filter((entry) => entry.startsWith('.tmp-')),
+      [],
+      'stalled download must clean up .tmp-* directory',
+    )
+  } finally {
+    serveMode = 'good'
+    servedVersions.delete('3.5.6')
   }
 })

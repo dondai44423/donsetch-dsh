@@ -51,8 +51,9 @@ export interface DonsetchConfig {
 /**
  * Per-call timeout for one tools/call. The configured callTimeoutMs is a
  * single bound for every tool, but the binary's own budgets are larger
- * than it: web_crawl accepts deadline_s up to 600 and web_fetch
- * deadline_ms up to 600000, so a legal call was being killed by the
+ * than it: web_crawl accepts deadline_s up to 600 and web_fetch,
+ * web_search, and web_screenshot accept deadline_ms up to 600000, so a
+ * legal call was being killed by the
  * client while the server was still inside its documented deadline (the
  * crawl default of 120s already sat inside the 180s default, racing
  * it). Derive the timeout from the call's own budget plus slack, capped

@@ -31,9 +31,12 @@ test('a crawl with no deadline still outlives the server default', () => {
   assert.equal(callTimeoutFor('web_crawl', { url: 'u' }, BASE), 140_000)
 })
 
-test('a fetch budget overrides, and the cap holds', () => {
+test('a fetch, search, or screenshot deadline_ms budget overrides, and the cap holds', () => {
   assert.equal(callTimeoutFor('web_fetch', { url: 'u', deadline_ms: 600_000 }, BASE), 620_000)
   assert.equal(callTimeoutFor('web_fetch', { url: 'u', deadline_ms: 999_999_999 }, BASE), 620_000)
+  assert.equal(callTimeoutFor('web_search', { query: 'q', deadline_ms: 240_000 }, BASE), 260_000)
+  assert.equal(callTimeoutFor('web_screenshot', { url: 'u', deadline_ms: 300_000 }, BASE), 320_000)
+  assert.equal(callTimeoutFor('web_screenshot', { url: 'u', deadline_ms: 999_999_999 }, BASE), 620_000)
 })
 
 test('unusable budgets fall back to the binary default, not to zero', () => {

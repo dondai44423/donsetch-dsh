@@ -47,8 +47,9 @@ function positiveNumber(value) {
 /**
  * Per-call timeout for one tools/call. The configured callTimeoutMs is a
  * single bound for every tool, but the binary's own budgets are larger
- * than it: web_crawl accepts deadline_s up to 600 and web_fetch
- * deadline_ms up to 600000, so a legal call was being killed by the
+ * than it: web_crawl accepts deadline_s up to 600 and web_fetch,
+ * web_search, and web_screenshot accept deadline_ms up to 600000, so a
+ * legal call was being killed by the
  * client while the server was still inside its documented deadline (the
  * crawl default of 120s already sat inside the 180s default, racing
  * it). Derive the timeout from the call's own budget plus slack, capped
@@ -63,7 +64,7 @@ export function callTimeoutFor(name, args, baseMs) {
         // No budget (or an unusable one) means the binary's own default.
         budgetMs = secs !== null ? secs * 1000 : 120_000;
     }
-    else if (name === 'web_fetch') {
+    else if (name === 'web_fetch' || name === 'web_search' || name === 'web_screenshot') {
         budgetMs = positiveNumber(a.deadline_ms);
     }
     if (budgetMs === null)
@@ -402,7 +403,15 @@ export function apply(ctx, rawConfig = {}) {
             execute: async () => {
                 const lines = [];
                 lines.push(`DonSeTch plugin status: ${status}`);
-                if (status === 'failed') {
+                if (status === 'ready') {
+                    lines.push('state: daemon running and healthy');
+                }
+                else if (status === 'degraded') {
+                    lines.push(booted?.bin.version === 'env'
+                        ? 'state: daemon running via DONSETCH_BIN override (degraded)'
+                        : 'state: daemon running via PATH fallback (degraded)');
+                }
+                else if (status === 'failed') {
                     lines.push(`state: ${bootError ?? 'unknown failure'}`);
                 }
                 else {
@@ -558,13 +567,26 @@ export function apply(ctx, rawConfig = {}) {
         booted = { bin, client: fresh };
         status = bin.source === 'path' ? 'degraded' : 'ready';
         bootError = null;
+        // Dispose prior tool registrations synchronously before re-registering
+        // so config restarts, crash recovery, and binary swaps refresh schemas
+        // without accumulating duplicate-tool entries in registrationFailures.
+        for (const dispose of disposers.splice(0)) {
+            try {
+                dispose();
+            }
+            catch {
+                // Disposer already ran; ignore.
+            }
+        }
+        registeredNames.clear();
+        registrationFailures.length = 0;
+        for (const tool of fresh.tools) {
+            registerTool(tool.name, tool.description, tool.inputSchema);
+        }
         registerStatusTools();
         // The daemon may rewrite byok-keys.json during startup (key
         // rotation/retirement bookkeeping): consume that write.
         refreshWatchBaseline();
-        for (const tool of fresh.tools) {
-            registerTool(tool.name, tool.description, tool.inputSchema);
-        }
         log(`ready: donsetch v${fresh.serverVersion ?? '?'} via ${bin.source} (${bin.path}), ${registeredNames.size} tools as ${config.toolPrefix}_*`);
     }
     async function ensureDaemon(signal) {
